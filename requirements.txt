@@ -1,0 +1,11 @@
+tensorboard
+easydict
+opencv-python
+matplotlib
+scipy
+rich
+onnxruntime
+onnx
+onnxsim
+# onnxoptimizer  <-- not supported on Python 3.10+ / PyTorch 2.x commonly
+

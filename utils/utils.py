@@ -51,24 +51,47 @@ def set_logger(log_path):
     Args:
         log_path: (string) where to log
     """
+    # 获取根日志记录器（Root Logger），它是整个日志系统的入口
     logger = logging.getLogger()
-    logger.setLevel(logging.INFO)  # CRITICAL > ERROR > WARNING > INFO > DEBUG
+    # 设置日志记录器的最低捕获级别为 INFO
+    # 级别顺序：CRITICAL > ERROR > WARNING > INFO > DEBUG
+    # 只有级别 >= INFO 的日志才会被记录（因此 DEBUG 信息会被忽略）
+    logger.setLevel(logging.INFO)  
 
+    # 判断是否已经添加了处理器（Handler），避免重复添加导致一条日志打印多次
     if not logger.handlers:
-        # Logging to a file
+        # =========================================
+        # 1. 配置文件处理器（File Handler）
+        # 作用：将日志信息写入到指定的磁盘文件中（log_path）
+        # =========================================
         file_handler = logging.FileHandler(log_path)
+        # 设置文件日志的格式：[时间]:[日志级别]: [消息内容]
+        # 这种详细的格式有助于后期排查问题
         file_handler.setFormatter(logging.Formatter('%(asctime)s:%(levelname)s: %(message)s'))
+        # 文件处理器记录所有 INFO 及以上级别的日志（详细记录训练过程）
         file_handler.setLevel(logging.INFO)
+        # 将文件处理器添加到 logger
         logger.addHandler(file_handler)
 
-        # Logging to console
+        # =========================================
+        # 2. 配置控制台处理器（Stream Handler）
+        # 作用：将日志信息输出到终端窗口（Console）
+        # 其他不重要的 info 信息全部被 File Handler 处理
+        # 控制台只显示 WARNING 及以上级别的日志，避免刷屏
+        # =========================================
         stream_handler = logging.StreamHandler()
+        # 设置控制台日志的格式：只显示 [消息内容]
+        # 简洁的格式适合实时查看，避免时间戳干扰阅读或进度条显示
         stream_handler.setFormatter(logging.Formatter('%(message)s'))
+        # 控制台只显示 WARNING 及以上级别的日志
+        # 所有的 logging.info() 只会写入文件，不会打印到屏幕，避免刷屏
         stream_handler.setLevel(logging.WARNING)
+        # 将控制台处理器添加到 logger
         logger.addHandler(stream_handler)
 
 
 def write_cfg(logging, cfg):
+    # logging.info(str) 将 str 写入 logging.info 级别的日志中
     for key_val in cfg:
         logging.info(str(key_val) + ': ' + str(cfg[key_val]))
     logging.info("\n")

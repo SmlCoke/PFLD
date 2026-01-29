@@ -14,6 +14,7 @@ class LandmarkLoss(nn.Module):
 
 
 def wing_loss(y_true, y_pred, N_LANDMARK, w=10.0, epsilon=2.0):
+    # 计算一个 Batch 内，N 个样本的 Wing Loss
     y_pred = y_pred.reshape(-1, N_LANDMARK, 2)
     y_true = y_true.reshape(-1, N_LANDMARK, 2)
 

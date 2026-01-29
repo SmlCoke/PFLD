@@ -4,7 +4,7 @@
 
 import os
 import argparse
-from torch.autograd import Variable
+# from torch.autograd import Variable
 import torch
 
 from models.PFLD import PFLD
@@ -15,7 +15,7 @@ import copy
 
 import onnx
 from onnxsim import simplify
-import onnxoptimizer
+# import onnxoptimizer
 
 
 def reparameterize_model(model: torch.nn.Module) -> torch.nn.Module:
@@ -59,7 +59,8 @@ if 'ghostone' in MODEL_TYPE.lower():
     model = reparameterize_model(model)
 
 print("=====> convert pytorch model to onnx...")
-dummy_input = Variable(torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE))
+# dummy_input = Variable(torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE))
+dummy_input = torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE)
 input_names = ["input"]
 output_names = ["output"]
 onnx_save_name = "{}_{}_{}.onnx".format(MODEL_TYPE, INPUT_SIZE, WIDTH_FACTOR)
@@ -68,9 +69,13 @@ torch.onnx.export(model, dummy_input, onnx_save_name, verbose=False, input_names
 model = onnx.load(onnx_save_name)
 model_simp, check = simplify(model)
 assert check, "Simplified ONNX model could not be validated"
+# passes = onnxoptimizer.get_fuse_and_elimination_passes()
+# opt_model = onnxoptimizer.optimize(model=model, passes=passes)
+# final_save_name = "{}_opt.onnx".format(onnx_save_name.split('.')[0])
+# onnx.save(opt_model, final_save_name)
+# print("=====> ONNX Model save in {}".format(final_save_name))
 
-passes = onnxoptimizer.get_fuse_and_elimination_passes()
-opt_model = onnxoptimizer.optimize(model=model, passes=passes)
-final_save_name = "{}_opt.onnx".format(onnx_save_name.split('.')[0])
-onnx.save(opt_model, final_save_name)
+# Use simplified model as final result since onnxoptimizer is deprecated/incompatible
+final_save_name = "{}_sim.onnx".format(onnx_save_name.split('.')[0])
+onnx.save(model_simp, final_save_name)
 print("=====> ONNX Model save in {}".format(final_save_name))

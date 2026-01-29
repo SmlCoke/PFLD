@@ -1,0 +1,18 @@
+Loading model: PFLD_GhostOne...
+Model loaded successfully.
+Found 7 images. Starting inference...
+Inference time: 314.46ms
+Saved result: ./test_imgs_results\0_51_Dresses_wearingdress_51_377_0.png
+Inference time: 30.53ms
+Saved result: ./test_imgs_results\duo.jpg
+Inference time: 60.29ms
+Saved result: ./test_imgs_results\duo2.jpg
+Inference time: 47.21ms
+Saved result: ./test_imgs_results\fj.jpg
+Inference time: 28.98ms
+Saved result: ./test_imgs_results\fj2.jpg
+Inference time: 47.51ms
+Saved result: ./test_imgs_results\fj3.jpg
+Inference time: 35.90ms
+Saved result: ./test_imgs_results\persons.jpg
+All Done.
