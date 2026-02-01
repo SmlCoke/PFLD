@@ -170,3 +170,6 @@ def wing_loss(y_true, y_pred, w=10.0, epsilon=2.0, N_LANDMARK=106):
     # torch.mean(..., axis=0): 最后对所有图片的总误差求均值，得到最终的 Loss 值
     return loss
 ```
+
+$$\operatorname{WingLoss}(x)=\left\{\begin{array}{ll}\omega \ln \left(1 + \left|x\right|/\omega \right), & \text { if }|x|<\omega \\|x| - C, & \text { otherwise }\end{array}\right.$$
+$$C = \omega[1-\ln\left(1+\omega/\epsilon \right)]$$

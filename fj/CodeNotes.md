@@ -505,6 +505,84 @@ class GhostOneBottleneck(Module):
 2.  **推理与训练**: `PFLD_GhostOne` 具有 `inference_mode` 开关。在训练时，它是一棵极其复杂的“分形树”（每个卷积层都是多分支的）；在推理时，通过重参数化，它折叠成一个非常简洁的“光杆”（单层卷积）。
 3.  **性能权衡**: `PFLD_GhostOne` 在训练期间需要更多的显存和计算时间，但能在推理时以相同的计算量提供更强的特征提取能力。
 
+### MobileOne 重参数化总结
+
+- 原结构：conv + bn
+  $$\begin{align*} 
+  & \mathbf{y_1}  = \mathbf{Wx} \\ 
+  & \mathbf{y}  = \frac{(\mathbf{y_1} - \mu_{\text{running}})}{\sqrt{\sigma_{\text{running}}^2 + \epsilon}} \cdot \gamma + \beta \Rightarrow \\
+  & \mathbf{y} = \mathbf{Wx} \cdot \frac{\gamma}{\sqrt{\sigma_{\text{running}}^2 + \epsilon}} - \mu_{\text{running}} \cdot \frac{\gamma}{\sqrt{\sigma_{\text{running}}^2 + \epsilon}} + \beta \\
+  \end{align*}$$
+- 合并后：
+  我们记：$\sigma^{\prime} = \sqrt{\sigma_{\text{running}}^2 + \epsilon}$，则：
+  $$\mathbf{y} = \mathbf{\frac{W}{\sigma^{\prime}}x}+\beta-\mu_{\text{running}} \cdot \frac{\gamma}{\sigma^{\prime}}$$
+  即：合并为：Conv_weight, Conv_bias
+
+核心函数：（来自 MobileOneBlock）
+```python
+def _fuse_bn_tensor(self, branch) -> Tuple[torch.Tensor, torch.Tensor]:
+    """ 分支融合原子操作：将 (Conv+BN) 或 (BN) 融合为 (Conv_weight, Conv_bias)。
+    
+    原理：
+    BN 公式: y = (x - mean) / sqrt(var + eps) * gamma + beta
+    卷积公式: y = Wx 
+    融合后: y = (W * gamma / std) * x + (beta - mean * gamma / std)
+    
+    :param branch: 输入分支，可能是 nn.Sequential(Conv, BN) 或者单独的 nn.BatchNorm2d
+    """
+    if isinstance(branch, nn.Sequential):
+        # Case 1: 分支是 Conv + BN
+        # 为什么是 .conv 和 .bn？详见本类的辅助函数 .conv_bn 的命名约定
+        kernel = branch.conv.weight
+        running_mean = branch.bn.running_mean
+        running_var = branch.bn.running_var
+        gamma = branch.bn.weight
+        beta = branch.bn.bias
+        eps = branch.bn.eps
+    else:
+        # Case 2: 分支只有 BN (Skip Connection)
+        assert isinstance(branch, nn.BatchNorm2d)
+        if not hasattr(self, 'id_tensor'):
+            # 构造一个恒等映射卷积核（Identity Kernel）
+            # 这是一个 KxK 的卷积核，除了中心点是 1，其余都是 0
+            input_dim = self.in_channels // self.groups
+            # 这是考虑了 分组卷积 (Group Convolution) 的情况。
+            # 如果是标准卷积，则self.groups = 1, 每个卷积核的深度等于输入通道数self.in_channels；如果是DWConv，则self.groups = self.in_channels, 每个卷积核的深度为1。
+            kernel_value = torch.zeros((self.in_channels,
+                                        # 按道理这里应该是self.out_channels，但是对应 Case 2: 分支只有 BN (Skip Connection)，这是恒等映射，self.in_channels == self.out_channels
+                                        input_dim,
+                                        self.kernel_size,
+                                        self.kernel_size),
+                                        dtype=branch.weight.dtype,
+                                        device=branch.weight.device)
+            # 构建了一个标准的 PyTorch 卷积权重容器，形状为：()[out_channels, in_channels/groups, K, K]，初始值全为0
+            # 如果是标准卷积，则 input_dim = self.in_channels；对应标准卷积的卷积核需要处理所有通道；如果是 DWConv，则 input_dim = 1；对应 DWConv 的卷积核每个只处理一个通道。
+            for i in range(self.in_channels):
+                # 按道理这里应该是self.out_channels，但是对应 Case 2: 分支只有 BN (Skip Connection)，这是恒等映射，self.in_channels == self.out_channels
+                kernel_value[i, i % input_dim,
+                                self.kernel_size // 2,
+                                self.kernel_size // 2] = 1
+                # 让卷积核中间的值为0
+                # 如果是标准卷积，input_dim = self.in_channels, 则 i % input_dim = i，即每隔通道的[self.kernel_size // 2, self.kernel_size // 2]位置为1
+                # 如果是 DWConv，input_dim = 1, 则 i % input_dim = 0，即只有每个卷积核的第0个输入通道的[self.kernel_size // 2, self.kernel_size // 2]位置为1
+            self.id_tensor = kernel_value
+        kernel = self.id_tensor
+        running_mean = branch.running_mean
+        running_var = branch.running_var
+        gamma = branch.weight
+        beta = branch.bias
+        eps = branch.eps
+        
+    # 融合公式实现
+    std = (running_var + eps).sqrt()
+    # t = gamma / std
+    t = (gamma / std).reshape(-1, 1, 1, 1) # reshape 以支持广播乘法
+    
+    # 新 Weight = 旧 Weight * (gamma / std)
+    # 新 Bias = beta - mean * (gamma / std)
+    return kernel * t, beta - running_mean * gamma / std
+```
+
 # Dataset and Date Augmentation
 
 计算机视觉的标注和计算过程中，关键点坐标经常是浮点数，主要有以下几个原因：
@@ -523,3 +601,96 @@ class GhostOneBottleneck(Module):
 
 为了保持最高的几何精度，避免在预处理和标注阶段引入人为的舍入误差，标注文件中的坐标通常保留为浮点数。==只有在最后需要画图显示（比如 cv2.circle）时，才会临时转为整数。==
 
+# PyTorch to ONNX
+
+```python
+def reparameterize_model(model: torch.nn.Module) -> torch.nn.Module:
+    """ Method returns a model where a multi-branched structure
+        used in training is re-parameterized into a single branch
+        for inference.
+    :param model: MobileOne model in train mode.
+    :return: MobileOne model in inference mode.
+    """
+    # Avoid editing original graph
+    model = copy.deepcopy(model)
+    for module in model.modules():
+        if hasattr(module, 'reparameterize'):
+            module.reparameterize()
+    return model
+```
+这个函数在使用 for module in model.modules(): 遍历模型中的各个模块时是如何便利的？在 base_module.py 定义自己的 block 和 bottleneck 时多次执行了类定义，并且继承了nn.module，并且这些 block/bottleneck内部又包含了其他模块例如ReLU, Identity, Conv2d, BatchNorm2d等。这些模块具有互相包含的关系，在遍历时不会重复吗？此外，具有reparameterize属性的模块执行reparameterize()后，这些新增的模块会再遍历一次吗？
+这是一个非常深入且触及 PyTorch 核心机制的问题。
+
+我的回答将分三点来详细解释：遍历顺序、重复与嵌套关系、以及动态修改后的行为。
+
+**(1) model.modules() 的遍历机制**
+model.modules() 采用的是 **深度优先 (Depth-First)** 的递归遍历方式。它会返回模型网络中所有的 nn.Module 实例，包含“父模块”和“子模块”。
+
+举个具体的例子
+假设你的 PFLD_GhostOne 结构如下（简化版）：
+```
+PFLD_GhostOne (整个模型)
+├── backbone (GhostOneBottleneck)
+│   ├── ghost_conv (Sequential)
+│   │   ├── 0: GhostOneModule
+│   │   │   ├── primary_conv (MobileOneBlock)  <--- 目标
+│   │   │   │   ├── rbr_conv (ModuleList)
+│   │   │   │   └── ...
+│   │   │   └── cheap_operation (MobileOneBlock) <--- 目标
+```
+当你执行 for module in model.modules(): 时，迭代器生成的顺序是这样的：
+
+1. PFLD_GhostOne (自己, Root)
+2. GhostOneBottleneck (backbone)
+3. Sequential (ghost_conv)
+4. GhostOneModule (第0层)
+5. MobileOneBlock (primary_conv) <-- 这里触发 reparameterize
+6. ModuleList (rbr_conv)
+7. Sequential (rbr_conv[0])
+8. Conv2d inside rbr_conv[0]
+9. BatchNorm2d inside rbr_conv[0]
+10. ...
+11. MobileOneBlock (cheap_operation) <-- 这里触发 reparameterize
+12. ...
+
+
+**(2) 关于“重复”与“包含关系”**
+问：这些模块具有互相包含的关系，在遍历时不会重复吗？
+
+答：**会包含所有层级，但同一个对象实例只会出现一次（除非你在定义时同一个对象用了两次）。**
+
+model.modules() 确实会把“父亲”、“儿子”、“孙子”都遍历一遍。
+
+- 当遍历到 GhostOneModule (父) 时，hasattr(module, 'reparameterize') 为 False (假设它没定义这个方法)，所以跳过。
+- 当遍历到 MobileOneBlock (子) 时，hasattr(module, 'reparameterize') 为 True，执行重参数化。
+- 当遍历到 Conv2d (孙子) 时，hasattr 为 False，跳过。
+关键点： 这种机制确保了我们不需要知道 MobileOneBlock 藏在哪一层，只要它是 nn.Module 的一员，迭代器最终一定会“钻”到它面前。
+
+**(3) 一边遍历一边修改 (最核心的问题)**
+问：具有 reparameterize 属性的模块执行 reparameterize() 后，这些新增的模块会再遍历一次吗？
+
+答：通常不会，且在这个特定场景下是安全的。
+
+这是 Python 生成器 (generator) 的特性决定的。
+
+1. 快照机制 (类比):
+  model.modules() 本质上是在调用 self.named_modules()。PyTorch 在你开始迭代的那一瞬间，根据当前的计算图结构生成了一个生成器。
+
+2. reparameterize() 干了什么？
+  让我们看 base_module.py 的代码：
+  ```python
+  def reparameterize(self):
+    # ...
+    # 1. 创建新层
+    self.reparam_conv = nn.Conv2d(...)
+    # 2. 删除旧层
+    self.__delattr__('rbr_conv')
+    # ...
+  ```
+  它是在当前正在遍历的 MobileOneBlock **对象内部动态添加了一个属性 reparam_conv 并删除了 rbr_conv**。
+
+3. 迭代器的行为:
+  - 当你遍历到 MobileOneBlock 时，Python 的**迭代器已经“进入”了这个节点**。
+  - 虽然你在内部添加了新成员 self.reparam_conv，但标准的 Python **深度优先遍历迭代器通常不会动态地去把刚刚插入到当前节点下的新子节点加入到当前正在进行的迭代队列中去**（因为它已经处理过当前节点的子节点列表生成步骤了，或者说 modules() 的递归逻辑通常是预先确定的）。
+  - 即便它遍历到了新加的 Conv2d：也没关系，因为 Conv2d 没有 reparameterize 方法，会被直接忽略。
+  - 关于被删除的子模块 (rbr_conv): 迭代器在进入 MobileOneBlock 之前就**已经生成了包含 rbr_conv 的列表**，那么迭代器接下来可能会访问 rbr_conv。但因为你在 MobileOneBlock 层级把它删了 (__delattr__)，**这只是切断了父子引用**。如果迭代器里还存着它的引用，它依然会被访问一次，但同样因为没有 reparameterize 方法而被忽略。
